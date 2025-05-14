@@ -210,95 +210,14 @@ install_peertube() {
   sed -i 's|server PEERTUBE_HOST;|server 127.0.0.1:9000;|g' "$NGINX_CONF_PEERTUBE"
   
   log_info "Temporarily modifying Nginx site config for Certbot..."
-  awk '
-    BEGIN { server_block_count=0; in_targeted_block=0 }
-    /server\s*\{/ {
-      server_block_count++;
-      block_buffer = $0; # Start buffer with the "server {" line
-      # Determine if this is the block we want to comment (the SSL block)
-      # by checking if it contains "listen 443" and NOT "listen 80"
-      # We need to read ahead a bit to check for listen directives.
-      is_ssl_block_candidate=0
-      is_http_block_candidate=0
-      
-      # Temporarily slurp the block to check its listen directives
-      temp_block_slurp = $0
-      temp_line_holder = ""
-      for (i=0;i<20;i++) { # Read a few lines or until end of block
-          if (getline temp_line_holder <= 0) { break; } # EOF
-          temp_block_slurp = temp_block_slurp "\n" temp_line_holder
-          if (temp_line_holder ~ /listen\s+80[^0-9]/) { is_http_block_candidate=1; }
-          if (temp_line_holder ~ /listen\s+443\s+ssl/) { is_ssl_block_candidate=1; }
-          if (temp_line_holder ~ /^}/) { break; } # End of current server block
-      }
-      # Reset getline for main processing
-      # This is tricky in awk; a simpler approach is to just process line by line for commenting
-
-      # Simpler awk: if it finds the SSL listen line, start commenting until '}'
-      # This still has issues if SSL block is before HTTP block.
-      # For PeerTube template: HTTP block is first, THEN upstream, THEN HTTPS block.
-      # Let's try to identify the SSL block more directly.
-    }
-
-    # More direct approach: If a line indicates an SSL server block, start a flag
-    # This assumes the SSL block reliably contains "listen 443 ssl"
-    # And the HTTP block does not contain "listen 443 ssl"
-    # And that the upstream block is not mistaken for a server block
-    
-    # If we are inside an SSL block and it is the target one
-    if (in_ssl_server_block_for_commenting) {
-      if ($0 ~ /^}/) { # End of the SSL server block
-        print "#TEMP_SSL_BLOCK_END#";
-        print "# " $0; # Comment the closing brace
-        in_ssl_server_block_for_commenting=0;
-      } else {
-        print "# " $0; # Comment lines within the block
-      }
-      next;
-    }
-
-    # Identify the start of the SSL server block
-    # Check it is a server block, and it contains "listen 443 ssl"
-    # and it is NOT the http block (which might have "listen 80")
-    # This is still complex. A robust way is to use a multi-pass or more state.
-
-    # Let's use a state machine based on typical peertube template order:
-    # 1. http block (listen 80)
-    # 2. upstream block
-    # 3. https block (listen 443 ssl)
-    if ($0 ~ /^\s*server\s*\{/) {
-        current_server_block_content = $0
-        is_http_block = 0
-        is_ssl_block = 0
-        # Read the whole block to determine its type
-        block_lines = ""
-        while (getline temp_line > 0) {
-            current_server_block_content = current_server_block_content "\n" temp_line
-            block_lines = block_lines temp_line "\n"
-            if (temp_line ~ /listen\s+80[^0-9]/) { is_http_block = 1; }
-            if (temp_line ~ /listen\s+443\s+ssl/) { is_ssl_block = 1; }
-            if (temp_line ~ /^}/) { break; }
-        }
-
-        if (is_ssl_block && !is_http_block) {
-            # This is the SSL block, comment it out
-            print "#TEMP_SSL_BLOCK_START#"
-            printf "%s", block_lines | awk "{print \"# \" \$0}"
-            print "#TEMP_SSL_BLOCK_END#"
-        } else if (is_http_block) {
-            # This is the HTTP block, ensure redirect is commented for acme-challenge
-            gsub (/^\s*location \/ *{ *return 301 https:\/\/\$host\$request_uri; *}/, "#TEMP_HTTP_REDIRECT#location / { return 301 https://\\$host\\$request_uri; }", current_server_block_content);
-            print current_server_block_content
-        } else {
-            # Some other server block or couldn't determine, print as is
-            print current_server_block_content
-        }
-        next
-    }
-    # Print lines not part of a server block (like upstream, or lines before first server block)
-    { print }
-
-  ' "$NGINX_CONF_PEERTUBE" > "${NGINX_CONF_PEERTUBE}.tmp" && mv "${NGINX_CONF_PEERTUBE}.tmp" "$NGINX_CONF_PEERTUBE"
+  # Comment out the redirect in the HTTP block
+  if grep -q "listen 80;" "$NGINX_CONF_PEERTUBE"; then
+      sed -i '/listen 80;/,/}/s|^\(\s*location\s*/\s*{\s*return\s*301\s*https://\$host\$request_uri;\s*}\)$|#TEMP_HTTP_REDIRECT#\1|' "$NGINX_CONF_PEERTUBE"
+  fi
+  # Comment out SSL cert lines and remove 'ssl' from listen 443 in the HTTPS block
+  if grep -q "listen 443 ssl" "$NGINX_CONF_PEERTUBE"; then
+      perl -0777 -i -pe 's/(listen\s+(?:\[::\]:)?443)\s+ssl(\s+http2)/\1\2 \#TEMP_SSL_LISTEN_MOD/g; s/(ssl_certificate(?:_key)?\s+[^;]+;)/\#TEMP_SSL_CERT\# \1/g' "$NGINX_CONF_PEERTUBE"
+  fi
 
   log_info "Enabling Nginx site for $PEERTUBE_DOMAIN..."
   ln -sfn "$NGINX_CONF_PEERTUBE" "/etc/nginx/sites-enabled/$PEERTUBE_DOMAIN"
@@ -320,10 +239,10 @@ install_peertube() {
   certbot --nginx -d "$PEERTUBE_DOMAIN" --non-interactive --agree-tos -m "$PEERTUBE_ADMIN_EMAIL" --redirect --keep-until-expiring
 
   log_info "Cleaning up temporary Nginx config modifications..."
-  sed -i '/^#TEMP_SSL_BLOCK_START#$/d' "$NGINX_CONF_PEERTUBE"
-  sed -i '/^#TEMP_SSL_BLOCK_END#$/d' "$NGINX_CONF_PEERTUBE"
   sed -i 's/^#TEMP_HTTP_REDIRECT# *//' "$NGINX_CONF_PEERTUBE"
-  sed -i 's/^# *//' "$NGINX_CONF_PEERTUBE" # General uncomment for lines prefixed with "# "
+  sed -i 's/^#TEMP_SSL_CERT# *//g' "$NGINX_CONF_PEERTUBE"
+  sed -i 's/ #TEMP_SSL_LISTEN_MOD#//g' "$NGINX_CONF_PEERTUBE"
+  # Certbot should have added 'ssl' back to listen directives. If not, it will be added when Nginx reloads with SSL certs.
 
   log_info "Final Nginx configuration test with SSL (after Certbot)..."
   if ! nginx -t; then
