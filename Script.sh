@@ -210,14 +210,33 @@ install_peertube() {
   sed -i 's|server PEERTUBE_HOST;|server 127.0.0.1:9000;|g' "$NGINX_CONF_PEERTUBE"
   
   log_info "Temporarily modifying Nginx site config for Certbot..."
-  # Comment out the redirect in the HTTP block
-  if grep -q "listen 80;" "$NGINX_CONF_PEERTUBE"; then
-      sed -i '/listen 80;/,/}/s|^\(\s*location\s*/\s*{\s*return\s*301\s*https://\$host\$request_uri;\s*}\)$|#TEMP_HTTP_REDIRECT#\1|' "$NGINX_CONF_PEERTUBE"
-  fi
-  # Comment out SSL cert lines and remove 'ssl' from listen 443 in the HTTPS block
-  if grep -q "listen 443 ssl" "$NGINX_CONF_PEERTUBE"; then
-      perl -0777 -i -pe 's/(listen\s+(?:\[::\]:)?443)\s+ssl(\s+http2)/\1\2 \#TEMP_SSL_LISTEN_MOD/g; s/(ssl_certificate(?:_key)?\s+[^;]+;)/\#TEMP_SSL_CERT\# \1/g' "$NGINX_CONF_PEERTUBE"
-  fi
+  # Comment out the redirect in the HTTP block (first server block)
+  perl -0777 -i -pe '
+    s{(server\s*\{(?:(?!server\s*\{)[\s\S])*?listen\s+80[^;]*?;(?:(?!server\s*\{)[\s\S])*?location\s+/\s*\{)\s*(return\s+301\s+https://\$host\$request_uri;)}{$1\n    #TEMP_HTTP_REDIRECT# $2}s;
+  ' "$NGINX_CONF_PEERTUBE"
+
+  # Comment out the entire second server block (assumed to be the SSL block)
+  awk '
+    BEGIN { server_block_num = 0; inside_second_server_block = 0; }
+    /^\s*server\s*\{/ {
+      server_block_num++;
+      if (server_block_num == 2) {
+        print "#TEMP_SSL_BLOCK_START#";
+        print "#" $0;
+        inside_second_server_block = 1;
+        next;
+      }
+    }
+    inside_second_server_block {
+      print "#" $0;
+      if (/^\s*}/) {
+        inside_second_server_block = 0;
+        print "#TEMP_SSL_BLOCK_END#";
+      }
+      next;
+    }
+    { print }
+  ' "$NGINX_CONF_PEERTUBE" > "${NGINX_CONF_PEERTUBE}.tmp" && mv "${NGINX_CONF_PEERTUBE}.tmp" "$NGINX_CONF_PEERTUBE"
 
   log_info "Enabling Nginx site for $PEERTUBE_DOMAIN..."
   ln -sfn "$NGINX_CONF_PEERTUBE" "/etc/nginx/sites-enabled/$PEERTUBE_DOMAIN"
@@ -233,16 +252,18 @@ install_peertube() {
   log_success "Initial Nginx (HTTP only) configuration test successful."
 
   log_info "Reloading Nginx for Certbot HTTP challenge..."
-  systemctl reload-or-restart nginx
+  systemctl stop nginx || true 
+  systemctl start nginx
+  systemctl reload nginx || systemctl start nginx
 
   log_info "Obtaining SSL certificate for $PEERTUBE_DOMAIN with Certbot..."
   certbot --nginx -d "$PEERTUBE_DOMAIN" --non-interactive --agree-tos -m "$PEERTUBE_ADMIN_EMAIL" --redirect --keep-until-expiring
 
-  log_info "Cleaning up temporary Nginx config modifications..."
-  sed -i 's/^#TEMP_HTTP_REDIRECT# *//' "$NGINX_CONF_PEERTUBE"
-  sed -i 's/^#TEMP_SSL_CERT# *//g' "$NGINX_CONF_PEERTUBE"
-  sed -i 's/ #TEMP_SSL_LISTEN_MOD#//g' "$NGINX_CONF_PEERTUBE"
-  # Certbot should have added 'ssl' back to listen directives. If not, it will be added when Nginx reloads with SSL certs.
+  log_info "Cleaning up temporary Nginx config modifications (Certbot should have reconfigured)..."
+  sed -i '/^#TEMP_SSL_BLOCK_START#$/d' "$NGINX_CONF_PEERTUBE"
+  sed -i '/^#TEMP_SSL_BLOCK_END#$/d' "$NGINX_CONF_PEERTUBE"
+  sed -i 's/^#TEMP_HTTP_REDIRECT#\s*//' "$NGINX_CONF_PEERTUBE"
+  sed -i 's/^#\s*//' "$NGINX_CONF_PEERTUBE"
 
   log_info "Final Nginx configuration test with SSL (after Certbot)..."
   if ! nginx -t; then
