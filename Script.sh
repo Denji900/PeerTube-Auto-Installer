@@ -209,24 +209,53 @@ install_peertube() {
   sed -i 's|server \${PEERTUBE_HOST};|server 127.0.0.1:9000;|g' "$NGINX_CONF_PEERTUBE"
   sed -i 's|server PEERTUBE_HOST;|server 127.0.0.1:9000;|g' "$NGINX_CONF_PEERTUBE"
   
+  log_info "Temporarily modifying Nginx site config for Certbot..."
+  awk '
+    BEGIN { in_ssl_block=0 }
+    /upstream backend/,/}/ { print; next }
+    /server *{/ {
+      current_block_content = $0;
+      is_http_block=0;
+      while (getline temp_line > 0) {
+        current_block_content = current_block_content "\n" temp_line;
+        if (temp_line ~ /listen 80;/) { is_http_block=1; }
+        if (temp_line ~ /^}/) { break; }
+      }
+      if (is_http_block) {
+        print current_block_content; # Print HTTP block as is (Certbot needs it)
+      } else {
+        # This is likely the SSL block, comment it out
+        gsub(/^/, "#TEMP_SSL_BLOCK# ", current_block_content);
+        print current_block_content;
+      }
+      next;
+    }
+    { print }
+  ' "$NGINX_CONF_PEERTUBE" > "${NGINX_CONF_PEERTUBE}.tmp" && mv "${NGINX_CONF_PEERTUBE}.tmp" "$NGINX_CONF_PEERTUBE"
+
+
   log_info "Enabling Nginx site for $PEERTUBE_DOMAIN..."
   ln -sfn "$NGINX_CONF_PEERTUBE" "/etc/nginx/sites-enabled/$PEERTUBE_DOMAIN"
 
-  log_info "Initial Nginx configuration test (expected to fail if certs not present)..."
+  log_info "Testing Nginx configuration (HTTP only for Certbot)..."
   if ! nginx -t; then
-      log_warn "Initial Nginx configuration test failed. This is often expected if SSL certificates are not yet present."
-      log_warn "Certbot will now attempt to obtain certificates and update the configuration."
-  else
-      log_success "Initial Nginx configuration test successful (this is unusual if certificates are not yet present)."
+    log_error "Nginx configuration test failed before Certbot!"
+    cat "$NGINX_CONF_PEERTUBE"
+    log_error "Please check your main /etc/nginx/nginx.conf or the PeerTube site config for errors."
+    exit 1
   fi
+  log_success "Initial Nginx (HTTP only) configuration test successful."
 
-  log_info "Ensuring Nginx is at least stopped or running for Certbot..."
-  systemctl stop nginx || true
+  log_info "Reloading Nginx for Certbot HTTP challenge..."
+  systemctl reload-or-restart nginx
 
   log_info "Obtaining SSL certificate for $PEERTUBE_DOMAIN with Certbot..."
   certbot --nginx -d "$PEERTUBE_DOMAIN" --non-interactive --agree-tos -m "$PEERTUBE_ADMIN_EMAIL" --redirect --keep-until-expiring
 
-  log_info "Final Nginx configuration test after Certbot..."
+  log_info "Cleaning up temporary Nginx config modifications..."
+  sed -i 's/^#TEMP_SSL_BLOCK# *//' "$NGINX_CONF_PEERTUBE"
+
+  log_info "Final Nginx configuration test with SSL (after Certbot)..."
   if ! nginx -t; then
       log_error "Nginx configuration test FAILED after Certbot setup!"
       log_error "Contents of /etc/nginx/sites-enabled/$PEERTUBE_DOMAIN :"
