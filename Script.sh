@@ -58,9 +58,15 @@ apt-get upgrade -y
 log_info "Installing basic dependencies (curl, sudo, unzip, vim, gnupg)..."
 apt-get install -y curl sudo unzip vim gnupg apt-transport-https
 
+log_info "Attempting to remove any existing older NodeJS versions and libnode-dev..."
+apt-get remove --purge -y nodejs libnode-dev > /dev/null 2>&1 || log_warn "Could not remove older nodejs/libnode-dev, or they were not installed. Continuing..."
+apt-get autoremove -y > /dev/null 2>&1 || log_warn "Autoremove failed or had nothing to remove. Continuing..."
+apt-get clean > /dev/null 2>&1
+
 NODE_MAJOR=20
-log_info "Installing NodeJS ${NODE_MAJOR}.x..."
-curl -fsSL https://deb.nodesource.com/setup_${NODE_MAJOR}.x | bash -
+log_info "Setting up Nodesource repository and installing NodeJS ${NODE_MAJOR}.x..."
+curl -fsSL https://deb.nodesource.com/setup_${NODE_MAJOR}.x | sudo -E bash -
+apt-get update -y
 apt-get install -y nodejs
 
 log_info "NodeJS version:"
@@ -74,14 +80,13 @@ log_info "Yarn version:"
 yarn --version
 
 log_info "Installing PostgreSQL, Nginx, Redis, FFmpeg, Certbot, and other dependencies..."
-
 apt-get install -y \
   postgresql postgresql-contrib \
   nginx \
   redis-server \
   ffmpeg \
   g++ make openssl libssl-dev \
-  python3-dev
+  python3-dev \
   cron \
   wget \
   certbot python3-certbot-nginx
@@ -106,8 +111,8 @@ log_success "'peertube' system user configured."
 log_info "Setting up PostgreSQL database for PeerTube..."
 sudo -u postgres psql -c "CREATE USER peertube WITH PASSWORD '$PEERTUBE_DB_PASSWORD';" || log_warn "PostgreSQL user 'peertube' might already exist."
 sudo -u postgres psql -c "CREATE DATABASE peertube_prod OWNER peertube ENCODING 'UTF8' TEMPLATE template0;" || log_warn "Database 'peertube_prod' might already exist."
-sudo -u postgres psql -d peertube_prod -c "CREATE EXTENSION pg_trgm;" || log_warn "pg_trgm extension might already be enabled."
-sudo -u postgres psql -d peertube_prod -c "CREATE EXTENSION unaccent;" || log_warn "unaccent extension might already be enabled."
+sudo -u postgres psql -d peertube_prod -c "CREATE EXTENSION IF NOT EXISTS pg_trgm;" || log_warn "Could not enable pg_trgm extension."
+sudo -u postgres psql -d peertube_prod -c "CREATE EXTENSION IF NOT EXISTS unaccent;" || log_warn "Could not enable unaccent extension."
 log_success "PostgreSQL database setup complete."
 
 log_info "Fetching latest PeerTube version tag..."
@@ -131,12 +136,12 @@ log_info "Downloading PeerTube v$PEERTUBE_VERSION..."
 cd /var/www/peertube/versions
 sudo -u peertube wget -q "https://github.com/Chocobozzz/PeerTube/releases/download/v${PEERTUBE_VERSION}/peertube-v${PEERTUBE_VERSION}.zip"
 log_info "Unzipping PeerTube..."
-sudo -u peertube unzip -q "peertube-v${PEERTUBE_VERSION}.zip"
+sudo -u peertube unzip -o -q "peertube-v${PEERTUBE_VERSION}.zip"
 sudo -u peertube rm "peertube-v${PEERTUBE_VERSION}.zip"
 
 log_info "Installing PeerTube..."
 cd /var/www/peertube
-sudo -u peertube ln -sf versions/peertube-v$PEERTUBE_VERSION peertube-latest
+sudo -u peertube ln -sfn versions/peertube-v$PEERTUBE_VERSION peertube-latest
 cd peertube-latest
 sudo -u peertube yarn install --production --pure-lockfile
 log_success "PeerTube installation complete."
@@ -144,7 +149,6 @@ log_success "PeerTube installation complete."
 log_info "Configuring PeerTube (production.yaml)..."
 CONFIG_DIR="/var/www/peertube/config"
 PRODUCTION_YAML="$CONFIG_DIR/production.yaml"
-DEFAULT_YAML="/var/www/peertube/peertube-latest/config/default.yaml"
 PRODUCTION_EXAMPLE_YAML="/var/www/peertube/peertube-latest/config/production.yaml.example"
 
 if [ ! -f "$PRODUCTION_YAML" ]; then
@@ -155,16 +159,15 @@ fi
 
 log_info "Setting basic configuration in $PRODUCTION_YAML..."
 sudo -u peertube sed -i "s|^\(\s*hostname:\s*\).*|\1'$PEERTUBE_DOMAIN'|" "$PRODUCTION_YAML"
-sudo -u peertube sed -i "s|^\(\s*port:\s*\).*# Overridden by PEERTUBE_PORT env var.*|\1 9000 # Default PeerTube listener port|" "$PRODUCTION_YAML"
+sudo -u peertube sed -i "s|^\(\s*port:\s*\).*|\1 9000|" "$PRODUCTION_YAML"
 sudo -u peertube sed -i "/webserver:/,/^[^[:space:]]/{s|^\(\s*listen:\s*\).*|\1 '0.0.0.0'|; s|^\(\s*port:\s*\).*|\1 9000|;}" "$PRODUCTION_YAML"
-
 
 log_info "Configuring database connection..."
 sudo -u peertube sed -i "s|^\(\s*username:\s*\).*|\1'peertube'|" "$PRODUCTION_YAML"
 sudo -u peertube sed -i "s|^\(\s*password:\s*\).*|\1'$PEERTUBE_DB_PASSWORD'|" "$PRODUCTION_YAML"
 
 log_info "Configuring admin email..."
-sudo -u peertube sed -i "s|^\(\s*email:\s*\).*# Administrator email.*|\1'$PEERTUBE_ADMIN_EMAIL' # Administrator email|" "$PRODUCTION_YAML"
+sudo -u peertube sed -i "s|^\(\s*email:\s*\).*|\1'$PEERTUBE_ADMIN_EMAIL'|" "$PRODUCTION_YAML"
 
 chown -R peertube:peertube "$CONFIG_DIR"
 chmod 640 "$PRODUCTION_YAML"
@@ -179,16 +182,15 @@ sudo cp /var/www/peertube/peertube-latest/support/nginx/peertube "$NGINX_CONF_PE
 sed -i "s/WEBSERVER_HOST/$PEERTUBE_DOMAIN/g" "$NGINX_CONF_PEERTUBE"
 sed -i "s/PEERTUBE_HOST/127.0.0.1:9000/g" "$NGINX_CONF_PEERTUBE"
 
-ln -sf "$NGINX_CONF_PEERTUBE" "/etc/nginx/sites-enabled/$PEERTUBE_DOMAIN"
+ln -sfn "$NGINX_CONF_PEERTUBE" "/etc/nginx/sites-enabled/$PEERTUBE_DOMAIN"
 
 log_info "Testing Nginx configuration..."
 nginx -t
 
-log_info "Stopping Nginx temporarily for Certbot standalone challenge..."
+log_info "Stopping Nginx temporarily for Certbot..."
 systemctl stop nginx || true
 
 log_info "Obtaining SSL certificate for $PEERTUBE_DOMAIN with Certbot..."
-
 certbot --nginx -d "$PEERTUBE_DOMAIN" --non-interactive --agree-tos -m "$PEERTUBE_ADMIN_EMAIL" --redirect
 
 log_info "Restarting Nginx with SSL configuration..."
@@ -203,7 +205,6 @@ sed -i "s|^User=peertube|User=peertube|" /etc/systemd/system/peertube.service
 sed -i "s|^Group=peertube|Group=peertube|" /etc/systemd/system/peertube.service
 sed -i "s|^WorkingDirectory=/var/www/peertube/peertube-latest|WorkingDirectory=/var/www/peertube/peertube-latest|" /etc/systemd/system/peertube.service
 sed -i "s|ExecStart=/usr/bin/yarn start --production|ExecStart=$(which yarn) start --production|" /etc/systemd/system/peertube.service
-
 
 systemctl daemon-reload
 systemctl enable --now peertube
