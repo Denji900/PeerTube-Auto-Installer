@@ -1,7 +1,43 @@
 #!/bin/bash
 set -e
 
-# ... (keep your initial prompts and summary here) ...
+read -p "Enter your domain name for PeerTube (e.g., peertube.example.com): " PEERTUBE_DOMAIN
+if [[ -z "$PEERTUBE_DOMAIN" ]]; then
+  echo "Domain name cannot be empty. Exiting."
+  exit 1
+fi
+
+read -sp "Enter a password for the 'peertube' system user: " PEERTUBE_SYSTEM_USER_PASSWORD
+echo
+if [[ -z "$PEERTUBE_SYSTEM_USER_PASSWORD" ]]; then
+  echo "PeerTube system user password cannot be empty. Exiting."
+  exit 1
+fi
+
+read -sp "Enter a password for the 'peertube' PostgreSQL database user: " PEERTUBE_DB_PASSWORD
+echo
+if [[ -z "$PEERTUBE_DB_PASSWORD" ]]; then
+  echo "PeerTube database password cannot be empty. Exiting."
+  exit 1
+fi
+
+read -p "Enter the email address for the PeerTube administrator (root user): " PEERTUBE_ADMIN_EMAIL
+if [[ -z "$PEERTUBE_ADMIN_EMAIL" ]]; then
+  echo "Admin email cannot be empty. Exiting."
+  exit 1
+fi
+
+echo "--- SUMMARY ---"
+echo "PeerTube Domain: $PEERTUBE_DOMAIN"
+echo "PeerTube Admin Email: $PEERTUBE_ADMIN_EMAIL"
+echo "PeerTube System User: peertube"
+echo "PeerTube DB User: peertube"
+echo "---"
+read -p "Proceed with installation? (y/N): " CONFIRM
+if [[ "$CONFIRM" != "y" && "$CONFIRM" != "Y" ]]; then
+  echo "Installation cancelled."
+  exit 0
+fi
 
 log_info() {
   echo "[INFO] $1"
@@ -23,14 +59,12 @@ log_info "Installing basic dependencies (curl, sudo, unzip, vim, gnupg)..."
 apt-get install -y curl sudo unzip vim gnupg apt-transport-https
 
 log_info "Attempting to remove any existing older NodeJS versions and libnode-dev..."
-# Check if libnode-dev is installed first
 if dpkg -l | grep -q 'libnode-dev'; then
   log_warn "'libnode-dev' is installed. Attempting to remove it along with old nodejs."
   apt-get remove --purge -y nodejs libnode-dev
   if dpkg -l | grep -q 'libnode-dev'; then
     log_warn "Failed to remove 'libnode-dev' with apt-get. Trying dpkg --force-depends."
-    dpkg --remove --force-depends libnode-dev || echo "dpkg remove failed for libnode-dev, but continuing."
-    # If it still exists after force, then there's a deeper issue
+    dpkg --remove --force-depends libnode-dev || echo "dpkg remove failed for libnode-dev, but continuing if error was minor."
     if dpkg -l | grep -q 'libnode-dev'; then
         echo "ERROR: 'libnode-dev' could not be removed. Please resolve this manually. The file /usr/include/node/common.gypi is causing a conflict."
         exit 1
@@ -38,7 +72,6 @@ if dpkg -l | grep -q 'libnode-dev'; then
   fi
 else
   log_info "'libnode-dev' not found, proceeding with NodeJS installation."
-  # Remove nodejs if it exists without libnode-dev for some reason
   apt-get remove --purge -y nodejs > /dev/null 2>&1 || true
 fi
 apt-get autoremove -y
@@ -55,14 +88,12 @@ node -v
 log_info "NPM version:"
 npm -v
 
-# ... (rest of your script from installing Yarn onwards) ...
-
 log_info "Installing Yarn..."
 npm install --global yarn
 log_info "Yarn version:"
 yarn --version
 
-log_info "Installing PostgreSQL, Nginx, Redis, FFmpeg, Certbot, and other dependencies..."
+log_info "Installing PostgreSQL, Nginx, Redis, FFmpeg, Certbot, jq, and other dependencies..."
 apt-get install -y \
   postgresql postgresql-contrib \
   nginx \
@@ -72,7 +103,7 @@ apt-get install -y \
   python3-dev \
   cron \
   wget \
-  certbot python3-certbot-nginx jq # Added jq here as it's used later
+  certbot python3-certbot-nginx jq
 
 log_info "Starting and enabling PostgreSQL and Redis..."
 systemctl start postgresql
@@ -99,7 +130,6 @@ sudo -u postgres psql -d peertube_prod -c "CREATE EXTENSION IF NOT EXISTS unacce
 log_success "PostgreSQL database setup complete."
 
 log_info "Fetching latest PeerTube version tag..."
-# jq should be installed with other dependencies now
 PEERTUBE_VERSION=$(curl -s https://api.github.com/repos/Chocobozzz/PeerTube/releases/latest | jq -r .tag_name | sed 's/v//')
 if [[ -z "$PEERTUBE_VERSION" ]]; then
   log_warn "Could not automatically fetch latest PeerTube version. Please check manually."
