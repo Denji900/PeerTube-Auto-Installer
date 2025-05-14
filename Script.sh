@@ -209,16 +209,19 @@ install_peertube() {
   sed -i 's|server \${PEERTUBE_HOST};|server 127.0.0.1:9000;|g' "$NGINX_CONF_PEERTUBE"
   sed -i 's|server PEERTUBE_HOST;|server 127.0.0.1:9000;|g' "$NGINX_CONF_PEERTUBE"
   
-  log_info "Temporarily commenting out SSL certificate lines for Certbot..."
+  log_info "Temporarily modifying Nginx config for Certbot..."
   sed -i '/listen 443 ssl http2;/,$ {/ssl_certificate /s/^/\#TEMP_SSL# /}' "$NGINX_CONF_PEERTUBE"
   sed -i '/listen 443 ssl http2;/,$ {/ssl_certificate_key /s/^/\#TEMP_SSL# /}' "$NGINX_CONF_PEERTUBE"
+  sed -i 's/listen 443 ssl http2;/listen 443 http2; \#TEMP_SSL_REMOVED_HERE/' "$NGINX_CONF_PEERTUBE"
+  sed -i 's/listen \[::\]:443 ssl http2;/listen \[::\]:443 http2; \#TEMP_SSL_REMOVED_HERE/' "$NGINX_CONF_PEERTUBE"
 
   log_info "Enabling Nginx site for $PEERTUBE_DOMAIN..."
   ln -sfn "$NGINX_CONF_PEERTUBE" "/etc/nginx/sites-enabled/$PEERTUBE_DOMAIN"
 
-  log_info "Testing Nginx configuration (with SSL lines temporarily commented)..."
+  log_info "Testing Nginx configuration (temporarily modified for Certbot)..."
   if ! nginx -t; then
-    log_error "Nginx configuration test failed even with SSL lines commented!"
+    log_error "Nginx configuration test failed even with SSL lines temporarily commented!"
+    cat "$NGINX_CONF_PEERTUBE"
     log_error "Please check your main /etc/nginx/nginx.conf or the PeerTube site config for other errors."
     log_error "The error message from 'nginx -t' should indicate the problematic file and line."
     exit 1
@@ -226,17 +229,21 @@ install_peertube() {
   log_success "Initial Nginx configuration test successful."
 
   log_info "Starting/Reloading Nginx for Certbot HTTP challenge..."
-  systemctl reload-or-restart nginx
+  systemctl stop nginx || true 
+  systemctl start nginx 
+  systemctl reload nginx || systemctl start nginx # Ensure it's running
 
   log_info "Obtaining SSL certificate for $PEERTUBE_DOMAIN with Certbot..."
   certbot --nginx -d "$PEERTUBE_DOMAIN" --non-interactive --agree-tos -m "$PEERTUBE_ADMIN_EMAIL" --redirect --keep-until-expiring
 
-  log_info "Ensuring SSL certificate lines are active by removing temporary comments..."
+  log_info "Cleaning up temporary SSL comments if any remain..."
   sed -i 's/^#TEMP_SSL# *//' "$NGINX_CONF_PEERTUBE"
+  sed -i 's/; #TEMP_SSL_REMOVED_HERE//' "$NGINX_CONF_PEERTUBE"
 
   log_info "Final Nginx configuration test with SSL..."
   if ! nginx -t; then
       log_error "Nginx configuration test failed after Certbot setup!"
+      cat "$NGINX_CONF_PEERTUBE"
       log_error "Check /etc/nginx/sites-enabled/$PEERTUBE_DOMAIN and output of 'nginx -t' for details."
       exit 1
   fi
