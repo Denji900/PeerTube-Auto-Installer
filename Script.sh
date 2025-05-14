@@ -1,29 +1,3 @@
-sudo journalctl -feu peertube.service
-```The YAML error should be gone. If new errors appear, they will point to the next issue.
-
-**Fixing the Script for Future Robustness:**
-
-1.  **For `production.yaml` admin email:**
-    The `sed` command for the admin email needs to be more precise about matching the structure.
-    Change:
-    ```bash
-    sudo -u peertube sed -i "s|^\(\s*email:\s*\).*|\1'$PEERTUBE_ADMIN_EMAIL'|" "$PRODUCTION_YAML"
-    ```
-    To (this targets `email:` specifically under an `admin:` block, preserving indentation):
-    ```bash
-    sudo -u peertube perl -0777 -i -pe "s/(admin\s*:\s*.*?email\s*:\s*')([^']+?)(')/\1$PEERTUBE_ADMIN_EMAIL\3/s" "$PRODUCTION_YAML"
-    ```
-    This Perl command is more robust for structured YAML replacement. It looks for `admin:`, then `email: '...'` and replaces the content of the email.
-
-2.  **For `peertube.service` `ExecStart`:**
-    The script already uses `YARN_PATH=$(which yarn)` and then `ExecStart=$YARN_PATH ...`. This is generally good. The issue "Failed to locate executable /usr/local/bin/yarn" arises if `which yarn` when run by root (as the script does) yields `/usr/local/bin/yarn`, but that path isn't available or valid in the environment where the `peertube` user (which systemd runs the service as) executes.
-    *   **Ensure `yarn` is truly installed globally and accessible system-wide.** `npm install --global yarn` *should* do this, but system configurations can vary.
-    *   A quick check: `sudo -u peertube which yarn`. If this doesn't find yarn, then the `peertube` user's PATH is the issue.
-    *   One robust way is to install yarn via `apt` if a suitable package exists (e.g., `sudo apt install cmdtest yarn` – though this might install an older version, check your distribution). If using `npm install --global yarn`, ensure npm's global bin directory is in the system's default PATH or the `peertube` user's PATH.
-
-**Full Corrected Script (incorporating the `production.yaml` fix and keeping the existing robust `ExecStart` logic for yarn):**
-
-```bash
 #!/bin/bash
 set -e
 
@@ -205,20 +179,15 @@ install_peertube() {
 
   log_info "Setting basic configuration in $PRODUCTION_YAML..."
   sudo -u peertube sed -i -E "s|^(\s*hostname:\s*).*|\1'$PEERTUBE_DOMAIN'|" "$PRODUCTION_YAML"
-  sudo -u peertube sed -i -E "s|^(\s*port:\s*).*|\1 9000|" "$PRODUCTION_YAML"
-  # For webserver block in production.yaml, ensure listen_address and port are set if they exist
-  sudo -u peertube perl -0777 -i -pe "s/(webserver\s*:\s*.*?listen_address\s*:\s*')([^']+?)(')/\10.0.0.0\3/s" "$PRODUCTION_YAML"
   sudo -u peertube perl -0777 -i -pe "s/(webserver\s*:\s*.*?port\s*:\s*)(\d+)/\19000/s" "$PRODUCTION_YAML"
-
-
+  sudo -u peertube perl -0777 -i -pe "s/(webserver\s*:\s*.*?listen_address\s*:\s*')([^']+?)(')/\10.0.0.0\3/s" "$PRODUCTION_YAML"
+  
   log_info "Configuring database connection..."
   sudo -u peertube perl -0777 -i -pe "s/(database\s*:\s*.*?username\s*:\s*')([^']+?)(')/\1peertube\3/s" "$PRODUCTION_YAML"
   sudo -u peertube perl -0777 -i -pe "s/(database\s*:\s*.*?password\s*:\s*')([^']+?)(')/\1$PEERTUBE_DB_PASSWORD\3/s" "$PRODUCTION_YAML"
 
   log_info "Configuring admin email..."
-  # This perl command specifically targets 'email:' under an 'admin:' block
   sudo -u peertube perl -0777 -i -pe "s/(admin\s*:\s*.*?email\s*:\s*')([^']+?)(')/\1$PEERTUBE_ADMIN_EMAIL\3/s" "$PRODUCTION_YAML"
-
 
   chown -R peertube:peertube "$CONFIG_DIR"
   chmod 640 "$PRODUCTION_YAML"
@@ -244,11 +213,13 @@ server {
 
     location /.well-known/acme-challenge/ {
         root $CERTBOT_WEBROOT;
+        try_files \$uri =404;
     }
 
     location / {
-        # Will be replaced by Certbot with a redirect or further config
-        return 404; 
+        # This can be a simple placeholder or a temporary redirect that Certbot will replace
+        # return 301 https://\$host\$request_uri; # Certbot often prefers to manage this itself
+        return 404; # Or just a 404 until Certbot configures SSL
     }
 }
 EOF
@@ -269,42 +240,47 @@ EOF
   systemctl reload-or-restart nginx
 
   log_info "Obtaining SSL certificate for $PEERTUBE_DOMAIN with Certbot..."
+  # --nginx plugin will find the above HTTP block and modify it for SSL.
   certbot --nginx -d "$PEERTUBE_DOMAIN" --non-interactive --agree-tos -m "$PEERTUBE_ADMIN_EMAIL" --redirect --keep-until-expiring
 
-  log_info "Replacing temporary Nginx config with full PeerTube template..."
+  log_info "Replacing Certbot-modified config with the full PeerTube template, then applying certs..."
+  # Save what Certbot did, in case we need to reference its SSL settings
+  mv "$NGINX_CONF_PEERTUBE" "${NGINX_CONF_PEERTUBE}.certbot_modified"
   sudo cp /var/www/peertube/peertube-latest/support/nginx/peertube "$NGINX_CONF_PEERTUBE"
 
+  # Replace domain name placeholders
   sed -i "s/\${PEERTUBE_DOMAIN}/$PEERTUBE_DOMAIN/g" "$NGINX_CONF_PEERTUBE"
   sed -i "s/PEERTUBE_DOMAIN/$PEERTUBE_DOMAIN/g" "$NGINX_CONF_PEERTUBE"
   sed -i "s/\${WEBSERVER_HOST}/$PEERTUBE_DOMAIN/g" "$NGINX_CONF_PEERTUBE"
   sed -i "s/WEBSERVER_HOST/$PEERTUBE_DOMAIN/g" "$NGINX_CONF_PEERTUBE"
 
+  # Replace PEERTUBE_HOST placeholder for the upstream backend
   sed -i 's|server "\${PEERTUBE_HOST}";|server 127.0.0.1:9000;|g' "$NGINX_CONF_PEERTUBE"
   sed -i 's|server \${PEERTUBE_HOST};|server 127.0.0.1:9000;|g' "$NGINX_CONF_PEERTUBE"
   sed -i 's|server PEERTUBE_HOST;|server 127.0.0.1:9000;|g' "$NGINX_CONF_PEERTUBE"
   
+  # Ensure SSL is on for port 443 in the full template
+  sed -i -E 's|listen\s+443(\s+http2)?\s*;|listen 443 ssl\1;|g' "$NGINX_CONF_PEERTUBE"
+  sed -i -E 's|listen\s+\[::\]:443(\s+http2)?\s*;|listen \[::\]:443 ssl\1;|g' "$NGINX_CONF_PEERTUBE"
+
+  # Set the certificate paths
   FULLCHAIN_PATH="/etc/letsencrypt/live/$PEERTUBE_DOMAIN/fullchain.pem"
   PRIVKEY_PATH="/etc/letsencrypt/live/$PEERTUBE_DOMAIN/privkey.pem"
-
-  # Ensure SSL certificate paths are correct in the full template
-  # Certbot's --nginx should manage these, but we ensure the template reflects them.
-  # First, ensure the listen directives for 443 have 'ssl'
-  perl -0777 -i -pe 's/(listen\s+(?:\[::\]:)?443)(?!.*\bssl\b)(.*?http2;)/$1 ssl$2/g' "$NGINX_CONF_PEERTUBE"
-
-  # Then set the certificate paths
   sed -i "s|^\(\s*ssl_certificate\s\+\).*;\s*$|\1$FULLCHAIN_PATH;|" "$NGINX_CONF_PEERTUBE"
   sed -i "s|^\(\s*ssl_certificate_key\s\+\).*;\s*$|\1$PRIVKEY_PATH;|" "$NGINX_CONF_PEERTUBE"
-  
-  # Ensure the include for Certbot's SSL options is present if Certbot added it previously,
-  # or add it if the template expects it.
+
+  # Add Certbot's recommended SSL options if not already present from template or Certbot's modification
   if ! grep -q "include /etc/letsencrypt/options-ssl-nginx.conf;" "$NGINX_CONF_PEERTUBE"; then
-      # This assumes the ssl_certificate_key line is a good place to insert after
       sed -i "/ssl_certificate_key/a \    include /etc/letsencrypt/options-ssl-nginx.conf;" "$NGINX_CONF_PEERTUBE"
   fi
   if ! grep -q "ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;" "$NGINX_CONF_PEERTUBE"; then
       sed -i "/include \/etc\/letsencrypt\/options-ssl-nginx.conf;/a \    ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;" "$NGINX_CONF_PEERTUBE"
   fi
-
+  # Comment out duplicate SSL settings from the template if options-ssl-nginx.conf is included
+  if grep -q "include /etc/letsencrypt/options-ssl-nginx.conf;" "$NGINX_CONF_PEERTUBE"; then
+    sed -i -E 's|^(\s*ssl_protocols\s+[^;]+;)|# Original template (now handled by options-ssl-nginx.conf): \1|' "$NGINX_CONF_PEERTUBE"
+    sed -i -E 's|^(\s*ssl_prefer_server_ciphers\s+on;)|# Original template (now handled by options-ssl-nginx.conf): \1|' "$NGINX_CONF_PEERTUBE"
+  fi
 
   log_info "Final Nginx configuration test with SSL (after Certbot and full template)..."
   if ! nginx -t; then
@@ -334,7 +310,6 @@ EOF
     log_error "Yarn command not found. Please ensure Yarn is installed and in PATH for the root user."
     exit 1
   fi
-  # This will replace the entire line starting with ExecStart= with the new command
   sed -i "s|^ExecStart=.*|ExecStart=$YARN_PATH start --production|" "$PEERTUBE_SERVICE_FILE"
 
   systemctl daemon-reload
