@@ -211,28 +211,43 @@ install_peertube() {
   
   log_info "Temporarily modifying Nginx site config for Certbot..."
   awk '
-    BEGIN { in_ssl_block=0 }
-    /upstream backend/,/}/ { print; next }
+    BEGIN { server_block_count=0; in_ssl_server_block=0 }
     /server *{/ {
-      current_block_content = $0;
-      is_http_block=0;
+      server_block_count++;
+      # Store the current block to make decisions after reading all its lines
+      current_block_content = $0; # Start with the "server {" line
+      is_http_block_for_awk=0; # Reset for each server block
+      
+      # Read the entire server block
+      temp_line = "";
       while (getline temp_line > 0) {
         current_block_content = current_block_content "\n" temp_line;
-        if (temp_line ~ /listen 80;/) { is_http_block=1; }
-        if (temp_line ~ /^}/) { break; }
+        if (temp_line ~ /listen 80[^0-9]/ || temp_line ~ /listen \[::\]:80[^0-9]/) { # More specific listen 80 check
+            is_http_block_for_awk=1;
+        }
+        if (temp_line ~ /^}/) { # End of current server block
+          break;
+        }
       }
-      if (is_http_block) {
-        print current_block_content; # Print HTTP block as is (Certbot needs it)
+
+      if (is_http_block_for_awk) {
+        # This is the HTTP block, ensure redirect is commented for acme-challenge
+        gsub (/^\s*location \/ *{ *return 301 https:\/\/\$host\$request_uri; *}/, "#TEMP_HTTP_REDIRECT#location / { return 301 https://\\$host\\$request_uri; }", current_block_content);
+        print current_block_content;
       } else {
-        # This is likely the SSL block, comment it out
-        gsub(/^/, "#TEMP_SSL_BLOCK# ", current_block_content);
+        # This is assumed to be the SSL block. Comment it out entirely for now.
+        # Or, more safely for Certbot --nginx, just remove ssl and cert lines
+        gsub (/^\s*listen\s+443\s+ssl/, "listen 443", current_block_content);
+        gsub (/^\s*listen\s+\[::\]:443\s+ssl/, "listen [::]:443", current_block_content);
+        gsub (/^\s*ssl_certificate\s+/, "#TEMP_SSL_CERT# ssl_certificate ", current_block_content);
+        gsub (/^\s*ssl_certificate_key\s+/, "#TEMP_SSL_CERT# ssl_certificate_key ", current_block_content);
         print current_block_content;
       }
       next;
     }
+    # Print lines not part of a server block (like upstream)
     { print }
   ' "$NGINX_CONF_PEERTUBE" > "${NGINX_CONF_PEERTUBE}.tmp" && mv "${NGINX_CONF_PEERTUBE}.tmp" "$NGINX_CONF_PEERTUBE"
-
 
   log_info "Enabling Nginx site for $PEERTUBE_DOMAIN..."
   ln -sfn "$NGINX_CONF_PEERTUBE" "/etc/nginx/sites-enabled/$PEERTUBE_DOMAIN"
@@ -240,6 +255,7 @@ install_peertube() {
   log_info "Testing Nginx configuration (HTTP only for Certbot)..."
   if ! nginx -t; then
     log_error "Nginx configuration test failed before Certbot!"
+    log_info "Current content of $NGINX_CONF_PEERTUBE :"
     cat "$NGINX_CONF_PEERTUBE"
     log_error "Please check your main /etc/nginx/nginx.conf or the PeerTube site config for errors."
     exit 1
@@ -253,7 +269,9 @@ install_peertube() {
   certbot --nginx -d "$PEERTUBE_DOMAIN" --non-interactive --agree-tos -m "$PEERTUBE_ADMIN_EMAIL" --redirect --keep-until-expiring
 
   log_info "Cleaning up temporary Nginx config modifications..."
-  sed -i 's/^#TEMP_SSL_BLOCK# *//' "$NGINX_CONF_PEERTUBE"
+  sed -i 's/^#TEMP_HTTP_REDIRECT# *//' "$NGINX_CONF_PEERTUBE"
+  sed -i 's/^#TEMP_SSL_CERT# *//' "$NGINX_CONF_PEERTUBE"
+  # Certbot should have properly reconfigured the listen directives with 'ssl'.
 
   log_info "Final Nginx configuration test with SSL (after Certbot)..."
   if ! nginx -t; then
