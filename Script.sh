@@ -224,7 +224,7 @@ install_peertube() {
   systemctl stop nginx || true
 
   log_info "Obtaining SSL certificate for $PEERTUBE_DOMAIN with Certbot..."
-  certbot --nginx -d "$PEERTUBE_DOMAIN" --non-interactive --agree-tos -m "$PEERTUBE_ADMIN_EMAIL" --redirect --keep-until-expiring --nginx-handle-challenges
+  certbot --nginx -d "$PEERTUBE_DOMAIN" --non-interactive --agree-tos -m "$PEERTUBE_ADMIN_EMAIL" --redirect --keep-until-expiring
 
   log_info "Final Nginx configuration test after Certbot..."
   if ! nginx -t; then
