@@ -40,7 +40,7 @@ install_peertube() {
     exit 1
   fi
 
-  read -p "Enter the email address for the PeerTube administrator (root user): " PEERTUBE_ADMIN_EMAIL
+  read -p "Enter the email address for the PeerTube administrator (root user) (used for SSL cert): " PEERTUBE_ADMIN_EMAIL
   if [[ -z "$PEERTUBE_ADMIN_EMAIL" ]]; then
     log_error "Admin email cannot be empty. Exiting."
     exit 1
@@ -195,50 +195,54 @@ install_peertube() {
   log_success "PeerTube basic configuration written."
   log_warn "You may need to further customize $PRODUCTION_YAML for advanced features (email, federation, etc.)."
 
-  log_info "Configuring Nginx..."
+  log_info "Configuring Nginx for $PEERTUBE_DOMAIN..."
   NGINX_CONF_PEERTUBE="/etc/nginx/sites-available/$PEERTUBE_DOMAIN"
   sudo rm -f "$NGINX_CONF_PEERTUBE"
   sudo cp /var/www/peertube/peertube-latest/support/nginx/peertube "$NGINX_CONF_PEERTUBE"
 
-  # Replace domain name placeholder (often PEERTUBE_DOMAIN or WEBSERVER_HOST in templates)
   sed -i "s/\${PEERTUBE_DOMAIN}/$PEERTUBE_DOMAIN/g" "$NGINX_CONF_PEERTUBE"
   sed -i "s/PEERTUBE_DOMAIN/$PEERTUBE_DOMAIN/g" "$NGINX_CONF_PEERTUBE"
   sed -i "s/\${WEBSERVER_HOST}/$PEERTUBE_DOMAIN/g" "$NGINX_CONF_PEERTUBE"
   sed -i "s/WEBSERVER_HOST/$PEERTUBE_DOMAIN/g" "$NGINX_CONF_PEERTUBE"
 
-  # Replace PEERTUBE_HOST placeholder for the upstream backend
   sed -i 's|server "\${PEERTUBE_HOST}";|server 127.0.0.1:9000;|g' "$NGINX_CONF_PEERTUBE"
   sed -i 's|server \${PEERTUBE_HOST};|server 127.0.0.1:9000;|g' "$NGINX_CONF_PEERTUBE"
   sed -i 's|server PEERTUBE_HOST;|server 127.0.0.1:9000;|g' "$NGINX_CONF_PEERTUBE"
+  
+  log_info "Temporarily commenting out SSL certificate lines for Certbot..."
+  sed -i '/listen 443 ssl http2;/,$ {/ssl_certificate /s/^/\#TEMP_SSL# /}' "$NGINX_CONF_PEERTUBE"
+  sed -i '/listen 443 ssl http2;/,$ {/ssl_certificate_key /s/^/\#TEMP_SSL# /}' "$NGINX_CONF_PEERTUBE"
 
   log_info "Enabling Nginx site for $PEERTUBE_DOMAIN..."
   ln -sfn "$NGINX_CONF_PEERTUBE" "/etc/nginx/sites-enabled/$PEERTUBE_DOMAIN"
-  log_info "Contents of /etc/nginx/sites-enabled/:"
-  ls -l /etc/nginx/sites-enabled/
 
-  log_info "Testing Nginx configuration..."
+  log_info "Testing Nginx configuration (with SSL lines temporarily commented)..."
   if ! nginx -t; then
-    log_error "Nginx configuration test failed!"
-    log_error "The error message above likely points to the issue."
-    log_error "If the error mentions '/etc/nginx/nginx.conf' (the main Nginx config file), as your previous error did:"
-    log_error "  'nginx: [emerg] the closing bracket in \"node\" variable is missing in /etc/nginx/nginx.conf:61'"
-    log_error "you will need to manually edit THIS FILE (/etc/nginx/nginx.conf) to fix the syntax error."
-    log_error "Please check line 61 (or the line indicated in the current error) and its surroundings in /etc/nginx/nginx.conf."
-    log_error "Common issues include typos, missing semicolons, or incorrect bracket placement."
-    log_error "After fixing it manually, run 'sudo nginx -t'. Once successful, you may need to re-run this script"
-    log_error "or manually complete the remaining steps (Certbot, starting PeerTube service)."
+    log_error "Nginx configuration test failed even with SSL lines commented!"
+    log_error "Please check your main /etc/nginx/nginx.conf or the PeerTube site config for other errors."
+    log_error "The error message from 'nginx -t' should indicate the problematic file and line."
     exit 1
   fi
-  log_success "Nginx configuration test successful."
+  log_success "Initial Nginx configuration test successful."
 
-  log_info "Stopping Nginx temporarily for Certbot..."
-  systemctl stop nginx || true
+  log_info "Starting/Reloading Nginx for Certbot HTTP challenge..."
+  systemctl reload-or-restart nginx
 
   log_info "Obtaining SSL certificate for $PEERTUBE_DOMAIN with Certbot..."
-  certbot --nginx -d "$PEERTUBE_DOMAIN" --non-interactive --agree-tos -m "$PEERTUBE_ADMIN_EMAIL" --redirect
+  certbot --nginx -d "$PEERTUBE_DOMAIN" --non-interactive --agree-tos -m "$PEERTUBE_ADMIN_EMAIL" --redirect --keep-until-expiring
 
-  log_info "Restarting Nginx with SSL configuration..."
-  systemctl start nginx
+  log_info "Ensuring SSL certificate lines are active by removing temporary comments..."
+  sed -i 's/^#TEMP_SSL# *//' "$NGINX_CONF_PEERTUBE"
+
+  log_info "Final Nginx configuration test with SSL..."
+  if ! nginx -t; then
+      log_error "Nginx configuration test failed after Certbot setup!"
+      log_error "Check /etc/nginx/sites-enabled/$PEERTUBE_DOMAIN and output of 'nginx -t' for details."
+      exit 1
+  fi
+  log_success "Final Nginx configuration with SSL test successful."
+
+  log_info "Reloading Nginx with SSL configuration..."
   systemctl reload nginx
   log_success "Nginx configured with SSL."
 
