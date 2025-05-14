@@ -1,44 +1,7 @@
 #!/bin/bash
 set -e
 
-read -p "Enter your domain name for PeerTube (e.g., peertube.example.com): " PEERTUBE_DOMAIN
-if [[ -z "$PEERTUBE_DOMAIN" ]]; then
-  echo "[ERROR] Domain name cannot be empty. Exiting." >&2
-  exit 1
-fi
-
-read -sp "Enter a password for the 'peertube' system user: " PEERTUBE_SYSTEM_USER_PASSWORD
-echo
-if [[ -z "$PEERTUBE_SYSTEM_USER_PASSWORD" ]]; then
-  echo "[ERROR] PeerTube system user password cannot be empty. Exiting." >&2
-  exit 1
-fi
-
-read -sp "Enter a password for the 'peertube' PostgreSQL database user: " PEERTUBE_DB_PASSWORD
-echo
-if [[ -z "$PEERTUBE_DB_PASSWORD" ]]; then
-  echo "[ERROR] PeerTube database password cannot be empty. Exiting." >&2
-  exit 1
-fi
-
-read -p "Enter the email address for the PeerTube administrator (root user): " PEERTUBE_ADMIN_EMAIL
-if [[ -z "$PEERTUBE_ADMIN_EMAIL" ]]; then
-  echo "[ERROR] Admin email cannot be empty. Exiting." >&2
-  exit 1
-fi
-
-echo "--- INSTALLATION SUMMARY ---"
-echo "PeerTube Domain: $PEERTUBE_DOMAIN"
-echo "PeerTube Admin Email: $PEERTUBE_ADMIN_EMAIL"
-echo "PeerTube System User: peertube"
-echo "PeerTube DB User: peertube"
-echo "---"
-read -p "Proceed with installation? (y/N): " CONFIRM
-if [[ "$CONFIRM" != "y" && "$CONFIRM" != "Y" ]]; then
-  echo "[INFO] Installation cancelled."
-  exit 0
-fi
-
+# --- Helper Functions ---
 log_info() {
   echo "[INFO] $1"
 }
@@ -55,7 +18,46 @@ log_success() {
   echo "[SUCCESS] $1"
 }
 
+# --- Installation Function ---
 install_peertube() {
+  read -p "Enter your domain name for PeerTube (e.g., peertube.example.com): " PEERTUBE_DOMAIN
+  if [[ -z "$PEERTUBE_DOMAIN" ]]; then
+    log_error "Domain name cannot be empty. Exiting."
+    exit 1
+  fi
+
+  read -sp "Enter a password for the 'peertube' system user: " PEERTUBE_SYSTEM_USER_PASSWORD
+  echo
+  if [[ -z "$PEERTUBE_SYSTEM_USER_PASSWORD" ]]; then
+    log_error "PeerTube system user password cannot be empty. Exiting."
+    exit 1
+  fi
+
+  read -sp "Enter a password for the 'peertube' PostgreSQL database user: " PEERTUBE_DB_PASSWORD
+  echo
+  if [[ -z "$PEERTUBE_DB_PASSWORD" ]]; then
+    log_error "PeerTube database password cannot be empty. Exiting."
+    exit 1
+  fi
+
+  read -p "Enter the email address for the PeerTube administrator (root user): " PEERTUBE_ADMIN_EMAIL
+  if [[ -z "$PEERTUBE_ADMIN_EMAIL" ]]; then
+    log_error "Admin email cannot be empty. Exiting."
+    exit 1
+  fi
+
+  echo "--- INSTALLATION SUMMARY ---"
+  echo "PeerTube Domain: $PEERTUBE_DOMAIN"
+  echo "PeerTube Admin Email: $PEERTUBE_ADMIN_EMAIL"
+  echo "PeerTube System User: peertube"
+  echo "PeerTube DB User: peertube"
+  echo "---"
+  read -p "Proceed with installation? (y/N): " CONFIRM
+  if [[ "$CONFIRM" != "y" && "$CONFIRM" != "Y" ]]; then
+    log_info "Installation cancelled."
+    exit 0
+  fi
+
   log_info "Updating system packages..."
   apt-get update -y
   apt-get upgrade -y
@@ -203,7 +205,10 @@ install_peertube() {
   sed -i 's|server \${PEERTUBE_HOST};|server 127.0.0.1:9000;|g' "$NGINX_CONF_PEERTUBE"
   sed -i 's|server PEERTUBE_HOST;|server 127.0.0.1:9000;|g' "$NGINX_CONF_PEERTUBE"
 
+  log_info "Enabling Nginx site for $PEERTUBE_DOMAIN..."
   ln -sfn "$NGINX_CONF_PEERTUBE" "/etc/nginx/sites-enabled/$PEERTUBE_DOMAIN"
+  log_info "Contents of /etc/nginx/sites-enabled/:"
+  ls -l /etc/nginx/sites-enabled/
 
   log_info "Testing Nginx configuration..."
   if ! nginx -t; then
@@ -314,7 +319,7 @@ uninstall_peertube() {
   else
     log_warn "Certbot command not found, cannot remove SSL certificate automatically."
   fi
-  
+
   log_info "Removing PeerTube application files in /var/www/peertube..."
   if [ -d "/var/www/peertube" ]; then
     rm -rf /var/www/peertube
