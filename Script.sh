@@ -200,7 +200,13 @@ install_peertube() {
   sudo rm -f "$NGINX_CONF_PEERTUBE"
   sudo cp /var/www/peertube/peertube-latest/support/nginx/peertube "$NGINX_CONF_PEERTUBE"
 
+  # Replace domain name placeholder (often PEERTUBE_DOMAIN or WEBSERVER_HOST in templates)
+  sed -i "s/\${PEERTUBE_DOMAIN}/$PEERTUBE_DOMAIN/g" "$NGINX_CONF_PEERTUBE"
+  sed -i "s/PEERTUBE_DOMAIN/$PEERTUBE_DOMAIN/g" "$NGINX_CONF_PEERTUBE"
+  sed -i "s/\${WEBSERVER_HOST}/$PEERTUBE_DOMAIN/g" "$NGINX_CONF_PEERTUBE"
   sed -i "s/WEBSERVER_HOST/$PEERTUBE_DOMAIN/g" "$NGINX_CONF_PEERTUBE"
+
+  # Replace PEERTUBE_HOST placeholder for the upstream backend
   sed -i 's|server "\${PEERTUBE_HOST}";|server 127.0.0.1:9000;|g' "$NGINX_CONF_PEERTUBE"
   sed -i 's|server \${PEERTUBE_HOST};|server 127.0.0.1:9000;|g' "$NGINX_CONF_PEERTUBE"
   sed -i 's|server PEERTUBE_HOST;|server 127.0.0.1:9000;|g' "$NGINX_CONF_PEERTUBE"
@@ -216,7 +222,7 @@ install_peertube() {
     log_error "The error message above likely points to the issue."
     log_error "If the error mentions '/etc/nginx/nginx.conf' (the main Nginx config file), as your previous error did:"
     log_error "  'nginx: [emerg] the closing bracket in \"node\" variable is missing in /etc/nginx/nginx.conf:61'"
-    log_error "you will need to manually edit this file to fix the syntax error."
+    log_error "you will need to manually edit THIS FILE (/etc/nginx/nginx.conf) to fix the syntax error."
     log_error "Please check line 61 (or the line indicated in the current error) and its surroundings in /etc/nginx/nginx.conf."
     log_error "Common issues include typos, missing semicolons, or incorrect bracket placement."
     log_error "After fixing it manually, run 'sudo nginx -t'. Once successful, you may need to re-run this script"
