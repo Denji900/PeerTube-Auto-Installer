@@ -210,10 +210,10 @@ install_peertube() {
   sed -i 's|server PEERTUBE_HOST;|server 127.0.0.1:9000;|g' "$NGINX_CONF_PEERTUBE"
   
   log_info "Temporarily modifying Nginx config for Certbot..."
-  sed -i '/listen 443 ssl http2;/,$ {/ssl_certificate /s/^/\#TEMP_SSL# /}' "$NGINX_CONF_PEERTUBE"
-  sed -i '/listen 443 ssl http2;/,$ {/ssl_certificate_key /s/^/\#TEMP_SSL# /}' "$NGINX_CONF_PEERTUBE"
-  sed -i 's/listen 443 ssl http2;/listen 443 http2; \#TEMP_SSL_REMOVED_HERE/' "$NGINX_CONF_PEERTUBE"
-  sed -i 's/listen \[::\]:443 ssl http2;/listen \[::\]:443 http2; \#TEMP_SSL_REMOVED_HERE/' "$NGINX_CONF_PEERTUBE"
+  sed -i 's|^\(\s*ssl_certificate\s\+.*\)|#TEMP_SSL#\1|' "$NGINX_CONF_PEERTUBE"
+  sed -i 's|^\(\s*ssl_certificate_key\s\+.*\)|#TEMP_SSL#\1|' "$NGINX_CONF_PEERTUBE"
+  sed -i -E 's|^(\s*listen\s+443\s+)ssl(\s+.*?;$)|\1\2 #TEMP_SSL_MARKER_LISTEN|' "$NGINX_CONF_PEERTUBE"
+  sed -i -E 's|^(\s*listen\s+\[::\]:443\s+)ssl(\s+.*?;$)|\1\2 #TEMP_SSL_MARKER_LISTEN|' "$NGINX_CONF_PEERTUBE"
 
   log_info "Enabling Nginx site for $PEERTUBE_DOMAIN..."
   ln -sfn "$NGINX_CONF_PEERTUBE" "/etc/nginx/sites-enabled/$PEERTUBE_DOMAIN"
@@ -231,14 +231,14 @@ install_peertube() {
   log_info "Starting/Reloading Nginx for Certbot HTTP challenge..."
   systemctl stop nginx || true 
   systemctl start nginx 
-  systemctl reload nginx || systemctl start nginx # Ensure it's running
+  systemctl reload nginx || systemctl start nginx
 
   log_info "Obtaining SSL certificate for $PEERTUBE_DOMAIN with Certbot..."
   certbot --nginx -d "$PEERTUBE_DOMAIN" --non-interactive --agree-tos -m "$PEERTUBE_ADMIN_EMAIL" --redirect --keep-until-expiring
 
   log_info "Cleaning up temporary SSL comments if any remain..."
   sed -i 's/^#TEMP_SSL# *//' "$NGINX_CONF_PEERTUBE"
-  sed -i 's/; #TEMP_SSL_REMOVED_HERE//' "$NGINX_CONF_PEERTUBE"
+  sed -i 's/ #TEMP_SSL_MARKER_LISTEN//' "$NGINX_CONF_PEERTUBE"
 
   log_info "Final Nginx configuration test with SSL..."
   if ! nginx -t; then
