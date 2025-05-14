@@ -1,6 +1,8 @@
 #!/bin/bash
 set -e
 
+echo "1.1.1.1.1"
+
 # --- Helper Functions ---
 log_info() {
   echo "[INFO] $1"
@@ -210,24 +212,18 @@ install_peertube() {
   sed -i 's|server PEERTUBE_HOST;|server 127.0.0.1:9000;|g' "$NGINX_CONF_PEERTUBE"
   
   log_info "Temporarily modifying Nginx site config for Certbot..."
-  # Comment out the redirect in the HTTP block
-  if grep -q "listen 80;" "$NGINX_CONF_PEERTUBE"; then
-      # This complex sed tries to only comment the redirect within the first server block (port 80 block)
-      # It's fragile. A simpler method of just commenting all such redirects might be safer if the template is simple.
-      perl -0777 -i -pe '
-        s{(server\s*\{(?:(?!server\s*\{)[\s\S])*?listen\s+80[^;]*?;(?:(?!server\s*\{)[\s\S])*?location\s+/\s*\{)\s*(return\s+301\s+https://\$host\$request_uri;)}{$1\n    #TEMP_HTTP_REDIRECT# $2}s;
-      ' "$NGINX_CONF_PEERTUBE"
-  fi
-  # In the HTTPS (port 443) block: comment certs, remove 'ssl' from listen
-  if grep -q "listen 443 ssl" "$NGINX_CONF_PEERTUBE"; then
-      # This Perl one-liner is applied to the whole file but the regex patterns are specific enough
-      # to target the lines within the SSL block (assuming a standard template structure)
-      perl -0777 -i -pe '
-        s/(listen\s+(?:\[::\]:)?443)\s+ssl(\s+http2)/\1\2 \#TEMP_SSL_LISTEN_MOD/g;
-        s/(\s*ssl_certificate\s+[^;]+;)/#TEMP_SSL_CERT#$1/g;
-        s/(\s*ssl_certificate_key\s+[^;]+;)/#TEMP_SSL_CERT#$1/g;
-      ' "$NGINX_CONF_PEERTUBE"
-  fi
+  # Comment out the redirect in the HTTP (port 80) server block's 'location /'
+  sed -i '/^\s*server\s*{/,/^\s*}/ { /listen\s\+80[^0-9]/,/^\s*}/ s|^\(\s*location\s*/\s*{\s*return\s*301\s*https://\$host\$request_uri;\s*}\)$|#TEMP_HTTP_REDIRECT#\1| }' "$NGINX_CONF_PEERTUBE"
+
+  # In the HTTPS (port 443) server block: comment certs, remove 'ssl' from listen
+  sed -i '/^\s*server\s*{/,/^\s*}/ {
+    /listen\s\+443\s\+ssl/ {
+      s/\(\s*listen\s\+443\)\s\+ssl/\1 \#TEMP_SSL_LISTEN_MOD/
+      s/\(\s*listen\s\+\[::\]:443\)\s\+ssl/\1 \#TEMP_SSL_LISTEN_MOD/
+      s|^\(\s*ssl_certificate\s\+[^;]\+;\)|#TEMP_SSL_CERT#\1|
+      s|^\(\s*ssl_certificate_key\s\+[^;]\+;\)|#TEMP_SSL_CERT#\1|
+    }
+  }' "$NGINX_CONF_PEERTUBE"
 
   log_info "Enabling Nginx site for $PEERTUBE_DOMAIN..."
   ln -sfn "$NGINX_CONF_PEERTUBE" "/etc/nginx/sites-enabled/$PEERTUBE_DOMAIN"
