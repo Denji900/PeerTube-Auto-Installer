@@ -1,7 +1,44 @@
 #!/bin/bash
 set -e
 
-# --- Helper Functions ---
+read -p "Enter your domain name for PeerTube (e.g., peertube.example.com): " PEERTUBE_DOMAIN
+if [[ -z "$PEERTUBE_DOMAIN" ]]; then
+  echo "[ERROR] Domain name cannot be empty. Exiting." >&2
+  exit 1
+fi
+
+read -sp "Enter a password for the 'peertube' system user: " PEERTUBE_SYSTEM_USER_PASSWORD
+echo
+if [[ -z "$PEERTUBE_SYSTEM_USER_PASSWORD" ]]; then
+  echo "[ERROR] PeerTube system user password cannot be empty. Exiting." >&2
+  exit 1
+fi
+
+read -sp "Enter a password for the 'peertube' PostgreSQL database user: " PEERTUBE_DB_PASSWORD
+echo
+if [[ -z "$PEERTUBE_DB_PASSWORD" ]]; then
+  echo "[ERROR] PeerTube database password cannot be empty. Exiting." >&2
+  exit 1
+fi
+
+read -p "Enter the email address for the PeerTube administrator (root user): " PEERTUBE_ADMIN_EMAIL
+if [[ -z "$PEERTUBE_ADMIN_EMAIL" ]]; then
+  echo "[ERROR] Admin email cannot be empty. Exiting." >&2
+  exit 1
+fi
+
+echo "--- INSTALLATION SUMMARY ---"
+echo "PeerTube Domain: $PEERTUBE_DOMAIN"
+echo "PeerTube Admin Email: $PEERTUBE_ADMIN_EMAIL"
+echo "PeerTube System User: peertube"
+echo "PeerTube DB User: peertube"
+echo "---"
+read -p "Proceed with installation? (y/N): " CONFIRM
+if [[ "$CONFIRM" != "y" && "$CONFIRM" != "Y" ]]; then
+  echo "[INFO] Installation cancelled."
+  exit 0
+fi
+
 log_info() {
   echo "[INFO] $1"
 }
@@ -18,46 +55,7 @@ log_success() {
   echo "[SUCCESS] $1"
 }
 
-# --- Installation Function ---
 install_peertube() {
-  read -p "Enter your domain name for PeerTube (e.g., peertube.example.com): " PEERTUBE_DOMAIN
-  if [[ -z "$PEERTUBE_DOMAIN" ]]; then
-    log_error "Domain name cannot be empty. Exiting."
-    exit 1
-  fi
-
-  read -sp "Enter a password for the 'peertube' system user: " PEERTUBE_SYSTEM_USER_PASSWORD
-  echo
-  if [[ -z "$PEERTUBE_SYSTEM_USER_PASSWORD" ]]; then
-    log_error "PeerTube system user password cannot be empty. Exiting."
-    exit 1
-  fi
-
-  read -sp "Enter a password for the 'peertube' PostgreSQL database user: " PEERTUBE_DB_PASSWORD
-  echo
-  if [[ -z "$PEERTUBE_DB_PASSWORD" ]]; then
-    log_error "PeerTube database password cannot be empty. Exiting."
-    exit 1
-  fi
-
-  read -p "Enter the email address for the PeerTube administrator (root user): " PEERTUBE_ADMIN_EMAIL
-  if [[ -z "$PEERTUBE_ADMIN_EMAIL" ]]; then
-    log_error "Admin email cannot be empty. Exiting."
-    exit 1
-  fi
-
-  echo "--- INSTALLATION SUMMARY ---"
-  echo "PeerTube Domain: $PEERTUBE_DOMAIN"
-  echo "PeerTube Admin Email: $PEERTUBE_ADMIN_EMAIL"
-  echo "PeerTube System User: peertube"
-  echo "PeerTube DB User: peertube"
-  echo "---"
-  read -p "Proceed with installation? (y/N): " CONFIRM
-  if [[ "$CONFIRM" != "y" && "$CONFIRM" != "Y" ]]; then
-    log_info "Installation cancelled."
-    exit 0
-  fi
-
   log_info "Updating system packages..."
   apt-get update -y
   apt-get upgrade -y
@@ -71,7 +69,7 @@ install_peertube() {
     apt-get remove --purge -y nodejs libnode-dev
     if dpkg -l | grep -q 'libnode-dev'; then
       log_warn "Failed to remove 'libnode-dev' with apt-get. Trying dpkg --force-depends."
-      dpkg --remove --force-depends libnode-dev || echo "dpkg remove failed for libnode-dev, but continuing if error was minor."
+      dpkg --remove --force-depends libnode-dev || echo "[WARN] dpkg remove failed for libnode-dev, but continuing if error was minor."
       if dpkg -l | grep -q 'libnode-dev'; then
           log_error "'libnode-dev' could not be removed. Please resolve this manually. The file /usr/include/node/common.gypi is causing a conflict."
           exit 1
@@ -140,7 +138,7 @@ install_peertube() {
   PEERTUBE_VERSION=$(curl -s https://api.github.com/repos/Chocobozzz/PeerTube/releases/latest | jq -r .tag_name | sed 's/v//')
   if [[ -z "$PEERTUBE_VERSION" ]]; then
     log_warn "Could not automatically fetch latest PeerTube version. Please check manually."
-    read -p "Enter PeerTube version to install (e.g., 3.1.0): " PEERTUBE_VERSION
+    read -p "Enter PeerTube version to install (e.g., 7.1.0): " PEERTUBE_VERSION
     if [[ -z "$PEERTUBE_VERSION" ]]; then
       log_error "Version required. Exiting."
       exit 1
@@ -208,7 +206,19 @@ install_peertube() {
   ln -sfn "$NGINX_CONF_PEERTUBE" "/etc/nginx/sites-enabled/$PEERTUBE_DOMAIN"
 
   log_info "Testing Nginx configuration..."
-  nginx -t
+  if ! nginx -t; then
+    log_error "Nginx configuration test failed!"
+    log_error "The error message above likely points to the issue."
+    log_error "If the error mentions '/etc/nginx/nginx.conf' (the main Nginx config file), as your previous error did:"
+    log_error "  'nginx: [emerg] the closing bracket in \"node\" variable is missing in /etc/nginx/nginx.conf:61'"
+    log_error "you will need to manually edit this file to fix the syntax error."
+    log_error "Please check line 61 (or the line indicated in the current error) and its surroundings in /etc/nginx/nginx.conf."
+    log_error "Common issues include typos, missing semicolons, or incorrect bracket placement."
+    log_error "After fixing it manually, run 'sudo nginx -t'. Once successful, you may need to re-run this script"
+    log_error "or manually complete the remaining steps (Certbot, starting PeerTube service)."
+    exit 1
+  fi
+  log_success "Nginx configuration test successful."
 
   log_info "Stopping Nginx temporarily for Certbot..."
   systemctl stop nginx || true
@@ -252,7 +262,6 @@ install_peertube() {
   echo "--------------------------------------------------------------------"
 }
 
-# --- Uninstallation Function ---
 uninstall_peertube() {
   read -p "Enter the domain name of the PeerTube instance to uninstall (e.g., peertube.example.com): " PEERTUBE_DOMAIN_UNINSTALL
   if [[ -z "$PEERTUBE_DOMAIN_UNINSTALL" ]]; then
@@ -292,7 +301,12 @@ uninstall_peertube() {
   rm -f "/etc/nginx/sites-enabled/$PEERTUBE_DOMAIN_UNINSTALL"
   rm -f "/etc/nginx/sites-available/$PEERTUBE_DOMAIN_UNINSTALL"
   log_info "Reloading Nginx..."
-  systemctl reload nginx || log_warn "Nginx reload failed (might be ok if config was already removed)."
+  if nginx -t; then
+    systemctl reload nginx || log_warn "Nginx reload failed."
+  else
+    log_warn "Nginx configuration test failed after removing site. Nginx not reloaded. Please check main Nginx config."
+  fi
+
 
   log_info "Attempting to remove SSL certificate for $PEERTUBE_DOMAIN_UNINSTALL..."
   if command -v certbot &> /dev/null; then
