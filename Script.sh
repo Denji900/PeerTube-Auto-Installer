@@ -74,13 +74,14 @@ log_info "Yarn version:"
 yarn --version
 
 log_info "Installing PostgreSQL, Nginx, Redis, FFmpeg, Certbot, and other dependencies..."
+
 apt-get install -y \
   postgresql postgresql-contrib \
   nginx \
   redis-server \
   ffmpeg \
   g++ make openssl libssl-dev \
-  python3-dev \
+  python3-dev
   cron \
   wget \
   certbot python3-certbot-nginx
@@ -143,6 +144,7 @@ log_success "PeerTube installation complete."
 log_info "Configuring PeerTube (production.yaml)..."
 CONFIG_DIR="/var/www/peertube/config"
 PRODUCTION_YAML="$CONFIG_DIR/production.yaml"
+DEFAULT_YAML="/var/www/peertube/peertube-latest/config/default.yaml"
 PRODUCTION_EXAMPLE_YAML="/var/www/peertube/peertube-latest/config/production.yaml.example"
 
 if [ ! -f "$PRODUCTION_YAML" ]; then
@@ -153,15 +155,16 @@ fi
 
 log_info "Setting basic configuration in $PRODUCTION_YAML..."
 sudo -u peertube sed -i "s|^\(\s*hostname:\s*\).*|\1'$PEERTUBE_DOMAIN'|" "$PRODUCTION_YAML"
-sudo -u peertube sed -i "s|^\(\s*port:\s*\).*# Overridden by PEERTUBE_PORT env var.*|\1 9000|" "$PRODUCTION_YAML"
+sudo -u peertube sed -i "s|^\(\s*port:\s*\).*# Overridden by PEERTUBE_PORT env var.*|\1 9000 # Default PeerTube listener port|" "$PRODUCTION_YAML"
 sudo -u peertube sed -i "/webserver:/,/^[^[:space:]]/{s|^\(\s*listen:\s*\).*|\1 '0.0.0.0'|; s|^\(\s*port:\s*\).*|\1 9000|;}" "$PRODUCTION_YAML"
+
 
 log_info "Configuring database connection..."
 sudo -u peertube sed -i "s|^\(\s*username:\s*\).*|\1'peertube'|" "$PRODUCTION_YAML"
 sudo -u peertube sed -i "s|^\(\s*password:\s*\).*|\1'$PEERTUBE_DB_PASSWORD'|" "$PRODUCTION_YAML"
 
 log_info "Configuring admin email..."
-sudo -u peertube sed -i "s|^\(\s*email:\s*\).*# Administrator email.*|\1'$PEERTUBE_ADMIN_EMAIL'|" "$PRODUCTION_YAML"
+sudo -u peertube sed -i "s|^\(\s*email:\s*\).*# Administrator email.*|\1'$PEERTUBE_ADMIN_EMAIL' # Administrator email|" "$PRODUCTION_YAML"
 
 chown -R peertube:peertube "$CONFIG_DIR"
 chmod 640 "$PRODUCTION_YAML"
@@ -181,10 +184,11 @@ ln -sf "$NGINX_CONF_PEERTUBE" "/etc/nginx/sites-enabled/$PEERTUBE_DOMAIN"
 log_info "Testing Nginx configuration..."
 nginx -t
 
-log_info "Stopping Nginx temporarily for Certbot..."
+log_info "Stopping Nginx temporarily for Certbot standalone challenge..."
 systemctl stop nginx || true
 
 log_info "Obtaining SSL certificate for $PEERTUBE_DOMAIN with Certbot..."
+
 certbot --nginx -d "$PEERTUBE_DOMAIN" --non-interactive --agree-tos -m "$PEERTUBE_ADMIN_EMAIL" --redirect
 
 log_info "Restarting Nginx with SSL configuration..."
@@ -199,6 +203,7 @@ sed -i "s|^User=peertube|User=peertube|" /etc/systemd/system/peertube.service
 sed -i "s|^Group=peertube|Group=peertube|" /etc/systemd/system/peertube.service
 sed -i "s|^WorkingDirectory=/var/www/peertube/peertube-latest|WorkingDirectory=/var/www/peertube/peertube-latest|" /etc/systemd/system/peertube.service
 sed -i "s|ExecStart=/usr/bin/yarn start --production|ExecStart=$(which yarn) start --production|" /etc/systemd/system/peertube.service
+
 
 systemctl daemon-reload
 systemctl enable --now peertube
