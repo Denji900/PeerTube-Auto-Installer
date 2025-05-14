@@ -1,8 +1,6 @@
 #!/bin/bash
 set -e
 
-echo "1.1.1.1.1"
-
 # --- Helper Functions ---
 log_info() {
   echo "[INFO] $1"
@@ -198,8 +196,53 @@ install_peertube() {
   log_warn "You may need to further customize $PRODUCTION_YAML for advanced features (email, federation, etc.)."
 
   log_info "Configuring Nginx for $PEERTUBE_DOMAIN..."
-  NGINX_CONF_PEERTUBE="/etc/nginx/sites-available/$PEERTUBE_DOMAIN"
-  sudo rm -f "$NGINX_CONF_PEERTUBE"
+  NGINX_SITES_AVAILABLE_DIR="/etc/nginx/sites-available"
+  NGINX_SITES_ENABLED_DIR="/etc/nginx/sites-enabled"
+  NGINX_CONF_PEERTUBE="$NGINX_SITES_AVAILABLE_DIR/$PEERTUBE_DOMAIN"
+  CERTBOT_WEBROOT="/var/www/certbot" 
+
+  mkdir -p "$CERTBOT_WEBROOT"
+  chown www-data:www-data "$CERTBOT_WEBROOT"
+
+  log_info "Creating temporary Nginx config for Certbot challenge..."
+  cat << EOF > "$NGINX_CONF_PEERTUBE"
+server {
+    listen 80;
+    listen [::]:80;
+    server_name $PEERTUBE_DOMAIN;
+
+    location /.well-known/acme-challenge/ {
+        root $CERTBOT_WEBROOT;
+    }
+
+    location / {
+        return 404; 
+    }
+}
+EOF
+
+  log_info "Enabling temporary Nginx site for $PEERTUBE_DOMAIN..."
+  # Remove any existing symlink first to avoid errors
+  rm -f "$NGINX_SITES_ENABLED_DIR/$PEERTUBE_DOMAIN"
+  ln -sfn "$NGINX_CONF_PEERTUBE" "$NGINX_SITES_ENABLED_DIR/$PEERTUBE_DOMAIN"
+
+  log_info "Testing temporary Nginx configuration for Certbot..."
+  if ! nginx -t; then
+    log_error "Temporary Nginx configuration test failed for Certbot!"
+    cat "$NGINX_CONF_PEERTUBE"
+    exit 1
+  fi
+  log_success "Temporary Nginx configuration test successful."
+
+  log_info "Reloading Nginx for Certbot HTTP challenge..."
+  systemctl reload-or-restart nginx
+
+  log_info "Obtaining SSL certificate for $PEERTUBE_DOMAIN with Certbot..."
+  certbot --nginx -d "$PEERTUBE_DOMAIN" --non-interactive --agree-tos -m "$PEERTUBE_ADMIN_EMAIL" --redirect --keep-until-expiring
+
+  log_info "Replacing temporary Nginx config with full PeerTube template..."
+  # Certbot has now modified $NGINX_CONF_PEERTUBE to include SSL.
+  # We will now overwrite it with the full template and re-apply placeholders and cert paths.
   sudo cp /var/www/peertube/peertube-latest/support/nginx/peertube "$NGINX_CONF_PEERTUBE"
 
   sed -i "s/\${PEERTUBE_DOMAIN}/$PEERTUBE_DOMAIN/g" "$NGINX_CONF_PEERTUBE"
@@ -210,52 +253,35 @@ install_peertube() {
   sed -i 's|server "\${PEERTUBE_HOST}";|server 127.0.0.1:9000;|g' "$NGINX_CONF_PEERTUBE"
   sed -i 's|server \${PEERTUBE_HOST};|server 127.0.0.1:9000;|g' "$NGINX_CONF_PEERTUBE"
   sed -i 's|server PEERTUBE_HOST;|server 127.0.0.1:9000;|g' "$NGINX_CONF_PEERTUBE"
-  
-  log_info "Temporarily modifying Nginx site config for Certbot..."
-  # Comment out the redirect in the HTTP (port 80) server block's 'location /'
-  sed -i '/^\s*server\s*{/,/^\s*}/ { /listen\s\+80[^0-9]/,/^\s*}/ s|^\(\s*location\s*/\s*{\s*return\s*301\s*https://\$host\$request_uri;\s*}\)$|#TEMP_HTTP_REDIRECT#\1| }' "$NGINX_CONF_PEERTUBE"
 
-  # In the HTTPS (port 443) server block: comment certs, remove 'ssl' from listen
-  sed -i '/^\s*server\s*{/,/^\s*}/ {
-    /listen\s\+443\s\+ssl/ {
-      s/\(\s*listen\s\+443\)\s\+ssl/\1 \#TEMP_SSL_LISTEN_MOD/
-      s/\(\s*listen\s\+\[::\]:443\)\s\+ssl/\1 \#TEMP_SSL_LISTEN_MOD/
-      s|^\(\s*ssl_certificate\s\+[^;]\+;\)|#TEMP_SSL_CERT#\1|
-      s|^\(\s*ssl_certificate_key\s\+[^;]\+;\)|#TEMP_SSL_CERT#\1|
-    }
-  }' "$NGINX_CONF_PEERTUBE"
+  # Ensure the SSL certificate paths in the full template point to the Certbot-generated ones.
+  # Note: Certbot's --nginx plugin often inserts its own SSL configuration block or includes.
+  # We need to be careful not to create conflicting SSL directives.
+  # A common Certbot pattern is to include '/etc/letsencrypt/options-ssl-nginx.conf'
+  # and set ssl_certificate and ssl_certificate_key.
+  # The PeerTube template already has these lines. We ensure they point to the right place.
+  FULLCHAIN_PATH="/etc/letsencrypt/live/$PEERTUBE_DOMAIN/fullchain.pem"
+  PRIVKEY_PATH="/etc/letsencrypt/live/$PEERTUBE_DOMAIN/privkey.pem"
 
-  log_info "Enabling Nginx site for $PEERTUBE_DOMAIN..."
-  ln -sfn "$NGINX_CONF_PEERTUBE" "/etc/nginx/sites-enabled/$PEERTUBE_DOMAIN"
-
-  log_info "Testing Nginx configuration (temporarily modified for Certbot)..."
-  if ! nginx -t; then
-    log_error "Nginx configuration test failed before Certbot!"
-    log_info "Current content of $NGINX_CONF_PEERTUBE :"
-    cat "$NGINX_CONF_PEERTUBE"
-    log_error "Please check your main /etc/nginx/nginx.conf or the PeerTube site config for errors."
-    exit 1
+  # Check if Certbot added its own SSL include, if so, we might not need to set certs explicitly in the main block
+  if ! grep -q "include /etc/letsencrypt/options-ssl-nginx.conf;" "$NGINX_CONF_PEERTUBE"; then
+    # If certbot didn't add its standard include, we assume it modified the existing lines,
+    # or we ensure our lines are correct. This part can be tricky.
+    # For now, let's assume the PeerTube template's structure is used and certbot filled it.
+    # We'll just make sure our template lines use the correct paths.
+    sed -i "s|ssl_certificate\s\+[^;]\+;|ssl_certificate     $FULLCHAIN_PATH;|g" "$NGINX_CONF_PEERTUBE"
+    sed -i "s|ssl_certificate_key\s\+[^;]\+;|ssl_certificate_key $PRIVKEY_PATH;|g" "$NGINX_CONF_PEERTUBE"
   fi
-  log_success "Initial Nginx (HTTP only) configuration test successful."
+  # Also, ensure the listen directives for 443 have 'ssl'. Certbot should do this.
+  sed -i 's|listen\s\+443\s\+http2;|listen 443 ssl http2;|g' "$NGINX_CONF_PEERTUBE"
+  sed -i 's|listen\s\+\[::\]:443\s\+http2;|listen \[::\]:443 ssl http2;|g' "$NGINX_CONF_PEERTUBE"
 
-  log_info "Reloading Nginx for Certbot HTTP challenge..."
-  systemctl stop nginx || true 
-  systemctl start nginx
-  systemctl reload nginx || systemctl start nginx
 
-  log_info "Obtaining SSL certificate for $PEERTUBE_DOMAIN with Certbot..."
-  certbot --nginx -d "$PEERTUBE_DOMAIN" --non-interactive --agree-tos -m "$PEERTUBE_ADMIN_EMAIL" --redirect --keep-until-expiring
-
-  log_info "Cleaning up temporary Nginx config modifications..."
-  sed -i 's/^#TEMP_HTTP_REDIRECT#\s*//' "$NGINX_CONF_PEERTUBE"
-  sed -i 's/^#TEMP_SSL_CERT#\s*//g' "$NGINX_CONF_PEERTUBE"
-  sed -i 's/\s*#TEMP_SSL_LISTEN_MOD#//g' "$NGINX_CONF_PEERTUBE"
-
-  log_info "Final Nginx configuration test with SSL (after Certbot)..."
+  log_info "Final Nginx configuration test with SSL (after Certbot and full template)..."
   if ! nginx -t; then
-      log_error "Nginx configuration test FAILED after Certbot setup!"
+      log_error "Nginx configuration test FAILED after Certbot setup and applying full template!"
       log_error "Contents of /etc/nginx/sites-enabled/$PEERTUBE_DOMAIN :"
-      cat "/etc/nginx/sites-enabled/$PEERTUBE_DOMAIN" || log_error "Could not display site config."
+      cat "$NGINX_CONF_PEERTUBE" || log_error "Could not display site config."
       log_error "Check the Nginx site configuration file and output of 'nginx -t' for details."
       log_error "You may need to manually edit /etc/nginx/sites-available/$PEERTUBE_DOMAIN to fix it."
       exit 1
@@ -333,8 +359,8 @@ uninstall_peertube() {
   systemctl daemon-reload
 
   log_info "Disabling and removing Nginx site configuration for $PEERTUBE_DOMAIN_UNINSTALL..."
-  rm -f "/etc/nginx/sites-enabled/$PEERTUBE_DOMAIN_UNINSTALL"
-  rm -f "/etc/nginx/sites-available/$PEERTUBE_DOMAIN_UNINSTALL"
+  rm -f "$NGINX_SITES_ENABLED_DIR/$PEERTUBE_DOMAIN_UNINSTALL"
+  rm -f "$NGINX_SITES_AVAILABLE_DIR/$PEERTUBE_DOMAIN_UNINSTALL"
   log_info "Reloading Nginx..."
   if nginx -t; then
     systemctl reload nginx || log_warn "Nginx reload failed."
