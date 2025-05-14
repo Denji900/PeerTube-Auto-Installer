@@ -190,10 +190,20 @@ log_warn "You may need to further customize $PRODUCTION_YAML for advanced featur
 
 log_info "Configuring Nginx..."
 NGINX_CONF_PEERTUBE="/etc/nginx/sites-available/$PEERTUBE_DOMAIN"
+# Ensure we're working with a fresh copy of the template
+sudo rm -f "$NGINX_CONF_PEERTUBE"
 sudo cp /var/www/peertube/peertube-latest/support/nginx/peertube "$NGINX_CONF_PEERTUBE"
 
+# Replace WEBSERVER_HOST (domain name)
 sed -i "s/WEBSERVER_HOST/$PEERTUBE_DOMAIN/g" "$NGINX_CONF_PEERTUBE"
-sed -i "s/PEERTUBE_HOST/127.0.0.1:9000/g" "$NGINX_CONF_PEERTUBE"
+
+# Replace PEERTUBE_HOST placeholder for the upstream server
+# This specifically targets the line like 'server PEERTUBE_HOST;' or 'server "${PEERTUBE_HOST}";'
+# and changes it to 'server 127.0.0.1:9000;'
+# It tries to handle a few common ways the placeholder might be written in the template.
+sed -i 's|server "\${PEERTUBE_HOST}";|server 127.0.0.1:9000;|g' "$NGINX_CONF_PEERTUBE"
+sed -i 's|server \${PEERTUBE_HOST};|server 127.0.0.1:9000;|g' "$NGINX_CONF_PEERTUBE"
+sed -i 's|server PEERTUBE_HOST;|server 127.0.0.1:9000;|g' "$NGINX_CONF_PEERTUBE"
 
 ln -sfn "$NGINX_CONF_PEERTUBE" "/etc/nginx/sites-enabled/$PEERTUBE_DOMAIN"
 
